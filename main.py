@@ -1,187 +1,162 @@
-import json
-import os
-import datetime
+# yurii_discipline_bot_v3.6.py
+# ➕ /help, /done, /reset, /plan
+
+import json, os, datetime, asyncio, random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, ContextTypes,
-    CommandHandler, MessageHandler, filters, JobQueue, CallbackQueryHandler
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from dotenv import load_dotenv
 
-# --- Конфігурація ---
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 USER_ID = int(os.getenv("USER_ID"))
 
-# --- Завантаження плану ---
 with open("yurii_discipline_plan_30days.json", "r", encoding="utf-8") as f:
     full_plan = json.load(f)
 
-# --- Стан користувача ---
-user_state = {
-    "day": 1,
-    "confirmed": False
-}
-
-# --- Статистика ---
-LOG_FILE = "yurii_progress_log.json"
-
-if os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "r", encoding="utf-8") as f:
-        progress_log = json.load(f)
+user_state = {"day": 1, "hellmode": False, "confirmed": False}
+JOURNAL_FILE = "journal.json"
+if os.path.exists(JOURNAL_FILE):
+    with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
+        journal_data = json.load(f)
 else:
-    progress_log = []
+    journal_data = {}
 
-# --- Часова зона для Німеччини ---
-TZ = datetime.timezone(datetime.timedelta(hours=2))
+MOTIVATION_QUOTES = [
+    "🔥 Якщо не ти — то хто?",
+    "💀 Дисципліна або смерть твоїм мріям.",
+    "🧠 Перемагає не сильний, а впертий.",
+    "🎯 Слабкість не дасть тобі мільйон.",
+    "🔪 Дій щодня — або знову будеш без грошей."
+]
 
-# --- Відправлення щоденного завдання ---
-async def send_daily_task(context: ContextTypes.DEFAULT_TYPE):
-    day = user_state["day"]
-    if str(day) not in full_plan:
-        await context.bot.send_message(chat_id=USER_ID, text="✅ План завершено!")
+def save_journal():
+    with open(JOURNAL_FILE, "w", encoding="utf-8") as f:
+        json.dump(journal_data, f, indent=2, ensure_ascii=False)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
         return
+    keyboard = [[InlineKeyboardButton("📅 Показати план", callback_data="show_plan")]]
+    await update.message.reply_text("👋 Готовий до прориву? Натисни кнопку або /hellmode.", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    task = full_plan[str(day)]
-    message = f"\U0001F680 День {day}:\n\n"
-    for block, item in task.items():
-        message += f"\u2728 *{block}*: {item}\n"
-    message += "\nНатисни кнопку, коли виконаєш завдання."
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
+        return
+    await update.message.reply_text(
+        "/start — активувати бота\n"
+        "/done — підтвердити виконання\n"
+        "/status — переглянути статус\n"
+        "/reset — почати знову з дня 1\n"
+        "/plan номер — переглянути завдання на вказаний день\n"
+        "/help — ця довідка"
+    )
 
-    keyboard = [[InlineKeyboardButton("✅ Виконано", callback_data="confirm_done")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await context.bot.send_message(chat_id=USER_ID, text=message, parse_mode="Markdown", reply_markup=reply_markup)
-    user_state["confirmed"] = False
-
-# --- Підтвердження виконання (кнопка або команда) ---
-async def confirm_done_action(context):
-    user_state["confirmed"] = True
-    user_state["day"] += 1
-
-    log_entry = {
-        "date": datetime.datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M"),
-        "day": user_state["day"] - 1,
-        "status": "✅ Виконано"
-    }
-    progress_log.append(log_entry)
-
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(progress_log, f, indent=2, ensure_ascii=False)
-
-# --- Команда /done ---
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if user_state["confirmed"]:
-        await update.message.reply_text("Вже підтверджено ✅")
-    else:
-        await confirm_done_action(context)
-        await update.message.reply_text("Добре, рухаємось далі! \U0001F4AA")
-
-# --- Обробка кнопки ---
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "confirm_done":
-        if user_state["confirmed"]:
-            await query.edit_message_text("Вже підтверджено ✅")
-        else:
-            await confirm_done_action(context)
-            await query.edit_message_text("Добре, рухаємось далі! \U0001F4AA")
-
-# --- Штрафи, якщо не підтверджено ---
-async def penalty_reminder(context: ContextTypes.DEFAULT_TYPE):
-    if not user_state["confirmed"]:
-        await context.bot.send_message(
-            chat_id=USER_ID,
-            text="\u274C Завдання не виконано. Уяви: день без інтернету, грошей чи їжі. Не допускай цього завтра."
-        )
-        log_entry = {
-            "date": datetime.datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M"),
-            "day": user_state["day"],
-            "status": "❌ Пропущено"
-        }
-        progress_log.append(log_entry)
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(progress_log, f, indent=2, ensure_ascii=False)
-
-# --- Щотижневий звіт ---
-async def weekly_report(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.datetime.now(tz=TZ)
-    week_ago = now - datetime.timedelta(days=7)
-    recent = [entry for entry in progress_log if datetime.datetime.strptime(entry["date"], "%Y-%m-%d %H:%M") >= week_ago]
-    if not recent:
-        msg = "За останній тиждень не було активності."
-    else:
-        msg = "📊 Звіт за останні 7 днів:\n"
-        for e in recent:
-            msg += f"{e['date']}: День {e['day']} — {e['status']}\n"
-    await context.bot.send_message(chat_id=USER_ID, text=msg)
-
-# --- Команда /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот активний. Завтра о 08:00 отримаєш завдання.")
-
-# --- Команда /status ---
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    day = user_state["day"]
-    confirmed = user_state["confirmed"]
-    msg = f"\U0001F4CA Сьогодні день: {day}\n"
-    msg += "\u2705 Виконано" if confirmed else "\u274C Не підтверджено"
-    await update.message.reply_text(msg)
-
-# --- Команда /reset ---
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_state["day"] = 1
-    user_state["confirmed"] = False
-    await update.message.reply_text("⏮ Починаємо знову з Дня 1")
-
-# --- Команда /help ---
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "\U0001F4D6 *Yurii Discipline Bot – Допомога*\n\n"
-        "/start – активувати бота\n"
-        "/done – підтвердити виконання\n"
-        "/status – переглянути поточний день та статус\n"
-        "/reset – почати знову з дня 1\n"
-        "/plan [номер] – переглянути завдання на вказаний день (або сьогодні)\n"
-        "/help – ця довідка\n\n"
-        "Щоранку о 08:00 ти отримуєш завдання. Якщо не підтвердиш – ввечері буде нагадування-шарлатан!"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# --- Команда /plan ---
-async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if args and args[0].isdigit():
-        day = int(args[0])
-    else:
+    if query.data == "show_plan":
         day = user_state["day"]
+        tasks = full_plan.get(str(day), ["Немає плану"])
+        mode = "HELLMODE" if user_state["hellmode"] else "Нормальний режим"
+        await query.edit_message_text(f"📅 День {day} ({mode}):\n" + "\n".join(f"🔹 {t}" for t in tasks))
+    elif query.data.startswith("journal_"):
+        result = query.data.split("_")[1]
+        today = datetime.date.today().isoformat()
+        journal_data[today] = result
+        save_journal()
+        await query.edit_message_text(f"📘 Звіт за {today}: {result}\n{random.choice(MOTIVATION_QUOTES)}")
 
-    if str(day) not in full_plan:
-        await update.message.reply_text("План на цей день не знайдено.")
+async def send_daily_task(context: ContextTypes.DEFAULT_TYPE):
+    day = user_state["day"]
+    tasks = full_plan.get(str(day), [])
+    if user_state["hellmode"]:
+        tasks += ["⚠️ Подвійне відео TikTok", "⚠️ 2x фокус-сесії"]
+    msg = f"🌅 День {day}. Завдання:\n" + "\n".join(f"✅ {t}" for t in tasks)
+    msg += f"\n\n{random.choice(MOTIVATION_QUOTES)}"
+    await context.bot.send_message(chat_id=USER_ID, text=msg)
+    user_state["confirmed"] = False
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+    if not user_state["confirmed"]:
+        await context.bot.send_message(chat_id=USER_ID, text="🔔 Ти ще не почав день. Не злий себе.")
+
+async def send_afternoon_check(context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=USER_ID, text="⏳ Як просувається день?")
+
+async def ask_for_journal(context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("✅ Виконав", callback_data="journal_done")],
+        [InlineKeyboardButton("❌ Не виконав", callback_data="journal_fail")]
+    ]
+    await context.bot.send_message(chat_id=USER_ID, text="📘 Що з сьогоднішнім днем?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
         return
+    output = "\n".join(f"{date}: {entry}" for date, entry in sorted(journal_data.items())) or "Немає записів."
+    await update.message.reply_text(f"📊 Журнал виконання:\n{output}")
 
-    task = full_plan[str(day)]
-    message = f"\U0001F4DD План на день {day}:\n\n"
-    for block, item in task.items():
-        message += f"\u2728 *{block}*: {item}\n"
-    await update.message.reply_text(message, parse_mode="Markdown")
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
+        return
+    day = user_state["day"]
+    hell = "ON" if user_state["hellmode"] else "OFF"
+    today = datetime.date.today().isoformat()
+    result = journal_data.get(today, "❓ Ще не відповідав")
+    await update.message.reply_text(f"📅 День: {day}\n🔥 Hellmode: {hell}\n📘 Звіт: {result}")
 
-# --- Запуск ---
-if __name__ == "__main__":
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
+        return
+    user_state["confirmed"] = True
+    user_state["day"] += 1
+    await update.message.reply_text("✅ День підтверджено! Рухаємось далі.")
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
+        return
+    user_state["day"] = 1
+    user_state["hellmode"] = False
+    await update.message.reply_text("🔁 Скинуто до Дня 1.")
+
+async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != USER_ID:
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Введи номер дня: /plan 1")
+        return
+    day = int(context.args[0])
+    tasks = full_plan.get(str(day), ["Немає завдань"])
+    await update.message.reply_text(f"📅 План на день {day}:\n" + "\n".join(f"🔹 {t}" for t in tasks))
+
+async def hellmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state["hellmode"] = True
+    await update.message.reply_text("💥 Hellmode активовано. Завтра — жорсткий день!")
+
+async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
+    past_7 = list(sorted(journal_data.items()))[-7:]
+    total = len([1 for d in past_7 if "done" in d[1]])
+    await context.bot.send_message(chat_id=USER_ID, text=f"📊 Звіт за тиждень:\n✅ {total}/7 виконано\n❌ {7 - total} прогулів")
+
+if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("plan", plan))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("journal", journal_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("plan", plan_command))
+    app.add_handler(CommandHandler("hellmode", hellmode_command))
+    app.add_handler(CallbackQueryHandler(button))
 
-    app.job_queue.run_daily(send_daily_task, time=datetime.time(hour=8, tzinfo=TZ))
-    app.job_queue.run_daily(penalty_reminder, time=datetime.time(hour=20, tzinfo=TZ))
-    app.job_queue.run_daily(weekly_report, time=datetime.time(hour=21, minute=0, tzinfo=TZ), days=(6,))  # Sunday
+    job_queue = app.job_queue
+    berlin_tz = datetime.timezone(datetime.timedelta(hours=2))
+    job_queue.run_daily(send_daily_task, time=datetime.time(hour=8, tzinfo=berlin_tz))
+    job_queue.run_daily(send_reminder, time=datetime.time(hour=12, tzinfo=berlin_tz))
+    job_queue.run_daily(send_afternoon_check, time=datetime.time(hour=17, tzinfo=berlin_tz))
+    job_queue.run_daily(ask_for_journal, time=datetime.time(hour=20, tzinfo=berlin_tz))
+    job_queue.run_daily(weekly_summary, time=datetime.time(hour=20, tzinfo=berlin_tz), days=(6,))
 
-    print("\u2705 Yurii Discipline Bot V3.3 запущено")
+    print("✅ Yurii Discipline Bot V3.6 запущено")
     app.run_polling()
